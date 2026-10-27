@@ -43,7 +43,22 @@
   const PROVIDERS = [
     { name: "adsb.lol", url: (la, lo, nm) => `https://api.adsb.lol/v2/lat/${la}/lon/${lo}/dist/${nm}` },
     { name: "airplanes.live", url: (la, lo, nm) => `https://api.airplanes.live/v2/point/${la}/${lo}/${nm}` },
-    { name: "adsb.fi", url: (la, lo, nm) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${nm}` }
+    { name: "adsb.fi", url: (la, lo, nm) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${nm}` },
+    {
+      name: "OpenSky",
+      // OpenSky demande un rectangle (lat/lon min et max) au lieu d’un rayon
+      url: (la, lo, nm) => {
+        const dLat = nm / 60, dLon = nm / (60 * Math.max(Math.cos(la * Math.PI / 180), 0.2));
+        return `https://opensky-network.org/api/states/all?lamin=${(la - dLat).toFixed(3)}&lomin=${(lo - dLon).toFixed(3)}&lamax=${(+la + dLat).toFixed(3)}&lomax=${(+lo + dLon).toFixed(3)}`;
+      },
+      // Convertit le format OpenSky (mètres, m/s) vers le nôtre (pieds, nœuds)
+      parse: (d) => (d.states || []).map((s) => ({
+        hex: s[0], flight: s[1], lon: s[5], lat: s[6],
+        alt_baro: s[8] ? "ground" : (typeof s[7] === "number" ? Math.round(s[7] * 3.28084) : null),
+        gs: typeof s[9] === "number" ? s[9] * 1.94384 : null,
+        track: s[10]
+      }))
+    }
   ];
   let current = 0;
   const REFRESH_MS = 15000;                 // rafraîchissement toutes les 15 s
@@ -156,7 +171,7 @@
         const res = await fetch(prov.url(la, lo, nm), { signal: ctrl.signal });
         if (!res.ok) throw new Error("code " + res.status);
         const data = await res.json();
-        updatePlanes(data.ac || data.aircraft || []);
+        updatePlanes(prov.parse ? prov.parse(data) : (data.ac || data.aircraft || []));
         current = idx;
         ok = true;
         setStatus(`${planes.size} avions (${prov.name})` + (tooWide ? ", zoomez pour voir toute la zone" : ""));
