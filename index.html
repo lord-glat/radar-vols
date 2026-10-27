@@ -39,14 +39,20 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
   // ---------- Réglages ----------
-  const API = "https://api.adsb.lol/v2";   // API publique gratuite
+  // Sources gratuites testées dans l’ordre : la première qui répond est utilisée
+  const PROVIDERS = [
+    { name: "adsb.lol", url: (la, lo, nm) => `https://api.adsb.lol/v2/lat/${la}/lon/${lo}/dist/${nm}` },
+    { name: "airplanes.live", url: (la, lo, nm) => `https://api.airplanes.live/v2/point/${la}/${lo}/${nm}` },
+    { name: "adsb.fi", url: (la, lo, nm) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${nm}` }
+  ];
+  let current = 0;
   const REFRESH_MS = 8000;                  // rafraîchissement toutes les 8 s
   const MAX_NM = 250;                       // rayon maximum accepté par l’API (milles nautiques)
 
   // ---------- Carte ----------
   const map = L.map("map", { worldCopyJump: true }).setView([46.6, 2.4], 7);
-  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-    attribution: "© OpenStreetMap, © CARTO", maxZoom: 18
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "© OpenStreetMap", maxZoom: 18
   }).addTo(map);
 
   const trailLine = L.polyline([], { color: "#f2c14e", weight: 2 }).addTo(map);
@@ -62,8 +68,8 @@
   function altColor(alt) {
     if (alt === "ground" || alt == null) return "#7d8b96";
     if (alt < 10000) return "#f2994a";
-    if (alt < 25000) return "#3fb6c9";
-    return "#8ab4ff";
+    if (alt < 25000) return "#1f9bb0";
+    return "#3d6fe0";
   }
 
   function planeIcon(ac) {
@@ -138,15 +144,28 @@
     let nm = Math.ceil(map.getCenter().distanceTo(map.getBounds().getNorthEast()) / 1852);
     const tooWide = nm > MAX_NM;
     nm = Math.min(nm, MAX_NM);
-    try {
-      const res = await fetch(`${API}/lat/${c.lat.toFixed(3)}/lon/${c.lng.toFixed(3)}/dist/${nm}`);
-      if (!res.ok) throw new Error("code " + res.status);
-      const data = await res.json();
-      updatePlanes(data.ac || []);
-      setStatus(`${planes.size} avions` + (tooWide ? " (zoomez pour voir toute la zone)" : ""));
-    } catch (err) {
-      setStatus("Erreur de chargement : " + err.message);
+    const la = c.lat.toFixed(3), lo = c.lng.toFixed(3);
+    const errors = [];
+    let ok = false;
+    for (let i = 0; i < PROVIDERS.length && !ok; i++) {
+      const idx = (current + i) % PROVIDERS.length;
+      const prov = PROVIDERS[idx];
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
+      try {
+        const res = await fetch(prov.url(la, lo, nm), { signal: ctrl.signal });
+        if (!res.ok) throw new Error("code " + res.status);
+        const data = await res.json();
+        updatePlanes(data.ac || data.aircraft || []);
+        current = idx;
+        ok = true;
+        setStatus(`${planes.size} avions (${prov.name})` + (tooWide ? ", zoomez pour voir toute la zone" : ""));
+      } catch (err) {
+        errors.push(prov.name + " : " + err.message);
+      }
+      clearTimeout(timer);
     }
+    if (!ok) setStatus("Aucune source disponible. " + errors.join(" | "));
     busy = false;
   }
 
