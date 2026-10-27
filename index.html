@@ -9,7 +9,7 @@
   html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; background: #0e1a24; color: #e8f0f5; }
   #map { position: absolute; inset: 0; background: #0e1a24; }
   #status { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1000;
-            background: #0e1a24ee; padding: 6px 14px; border-radius: 6px; font-size: 13px; white-space: nowrap; }
+            background: #0e1a24ee; padding: 6px 14px; border-radius: 6px; font-size: 13px; max-width: 86vw; text-align: center; box-sizing: border-box; }
   #info { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1000; display: none;
           background: #0e1a24f5; border-top: 2px solid #f2c14e; padding: 12px 16px 16px; }
   #info h2 { margin: 0 0 8px; font-size: 20px; }
@@ -46,7 +46,7 @@
     { name: "adsb.fi", url: (la, lo, nm) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${nm}` }
   ];
   let current = 0;
-  const REFRESH_MS = 8000;                  // rafraîchissement toutes les 8 s
+  const REFRESH_MS = 15000;                 // rafraîchissement toutes les 15 s
   const MAX_NM = 250;                       // rayon maximum accepté par l’API (milles nautiques)
 
   // ---------- Carte ----------
@@ -169,7 +169,9 @@
     busy = false;
   }
 
-  map.on("moveend", refresh);
+  // Attend 1,5 s après la fin du déplacement de la carte avant de recharger
+  let moveTimer = null;
+  map.on("moveend", () => { clearTimeout(moveTimer); moveTimer = setTimeout(refresh, 1500); });
   setInterval(refresh, REFRESH_MS);
   refresh();
 </script>
