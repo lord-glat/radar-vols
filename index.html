@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Radar de vols</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; background: #0e1a24; color: #e8f0f5; }
+  #map { position: absolute; inset: 0; background: #0e1a24; }
+  #status { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1000;
+            background: #0e1a24ee; padding: 6px 14px; border-radius: 6px; font-size: 13px; white-space: nowrap; }
+  #info { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1000; display: none;
+          background: #0e1a24f5; border-top: 2px solid #f2c14e; padding: 12px 16px 16px; }
+  #info h2 { margin: 0 0 8px; font-size: 20px; }
+  #info dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0; font-size: 14px; }
+  #info dt { color: #8fa6b5; }
+  #info dd { margin: 0; }
+  #close { position: absolute; top: 8px; right: 12px; background: none; border: 0; color: #e8f0f5; font-size: 26px; cursor: pointer; }
+  #close:focus-visible { outline: 2px solid #f2c14e; }
+  .plane { transition: transform 0.4s linear; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="status">Chargement…</div>
+<div id="info">
+  <button id="close" aria-label="Fermer la fiche">×</button>
+  <h2 id="f-call"></h2>
+  <dl>
+    <dt>Immatriculation</dt><dd id="f-reg"></dd>
+    <dt>Type d’appareil</dt><dd id="f-type"></dd>
+    <dt>Altitude</dt><dd id="f-alt"></dd>
+    <dt>Vitesse</dt><dd id="f-spd"></dd>
+    <dt>Cap</dt><dd id="f-trk"></dd>
+  </dl>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+  // ---------- Réglages ----------
+  const API = "https://api.adsb.lol/v2";   // API publique gratuite
+  const REFRESH_MS = 8000;                  // rafraîchissement toutes les 8 s
+  const MAX_NM = 250;                       // rayon maximum accepté par l’API (milles nautiques)
+
+  // ---------- Carte ----------
+  const map = L.map("map", { worldCopyJump: true }).setView([46.6, 2.4], 7);
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+    attribution: "© OpenStreetMap, © CARTO", maxZoom: 18
+  }).addTo(map);
+
+  const trailLine = L.polyline([], { color: "#f2c14e", weight: 2 }).addTo(map);
+  const planes = new Map();   // hex -> { marker, trail, ac }
+  let selected = null;
+  let busy = false;
+
+  const $ = (id) => document.getElementById(id);
+
+  function setStatus(text) { $("status").textContent = text; }
+
+  // Couleur selon l’altitude (en pieds)
+  function altColor(alt) {
+    if (alt === "ground" || alt == null) return "#7d8b96";
+    if (alt < 10000) return "#f2994a";
+    if (alt < 25000) return "#3fb6c9";
+    return "#8ab4ff";
+  }
+
+  function planeIcon(ac) {
+    const rot = Math.round(ac.track ?? 0);
+    const html =
+      `<div class="plane" style="transform:rotate(${rot}deg)">` +
+      `<svg viewBox="0 0 24 24" width="26" height="26">` +
+      `<path d="M12 2l2 7 8 4v2l-8-2-1 5 3 2v2l-4-1-4 1v-2l3-2-1-5-8 2v-2l8-4z" ` +
+      `fill="${altColor(ac.alt_baro)}" stroke="#0e1a24" stroke-width="1"/></svg></div>`;
+    return L.divIcon({ html, className: "", iconSize: [26, 26], iconAnchor: [13, 13] });
+  }
+
+  // ---------- Mise à jour des avions ----------
+  function updatePlanes(list) {
+    const seen = new Set();
+    for (const ac of list) {
+      if (typeof ac.lat !== "number" || typeof ac.lon !== "number") continue;
+      const hex = ac.hex;
+      seen.add(hex);
+      let p = planes.get(hex);
+      if (!p) {
+        const marker = L.marker([ac.lat, ac.lon], { icon: planeIcon(ac) }).addTo(map);
+        marker.on("click", () => select(hex));
+        p = { marker, trail: [], ac };
+        planes.set(hex, p);
+      } else {
+        p.marker.setLatLng([ac.lat, ac.lon]);
+        p.marker.setIcon(planeIcon(ac));
+      }
+      p.ac = ac;
+      p.trail.push([ac.lat, ac.lon]);
+      if (p.trail.length > 150) p.trail.shift();
+    }
+    // Retire les avions qui ne sont plus dans la zone
+    for (const [hex, p] of planes) {
+      if (!seen.has(hex)) { p.marker.remove(); planes.delete(hex); }
+    }
+    showInfo();
+  }
+
+  // ---------- Fiche de l’avion sélectionné ----------
+  function select(hex) { selected = hex; showInfo(); }
+
+  function showInfo() {
+    const p = selected && planes.get(selected);
+    if (!p) { $("info").style.display = "none"; trailLine.setLatLngs([]); return; }
+    const ac = p.ac;
+    $("f-call").textContent = (ac.flight || "").trim() || "Sans indicatif";
+    $("f-reg").textContent = ac.r || "Inconnue";
+    $("f-type").textContent = ac.t || "Inconnu";
+    if (ac.alt_baro === "ground") {
+      $("f-alt").textContent = "Au sol";
+    } else if (typeof ac.alt_baro === "number") {
+      $("f-alt").textContent = `${Math.round(ac.alt_baro * 0.3048).toLocaleString("fr-FR")} m (${ac.alt_baro.toLocaleString("fr-FR")} ft)`;
+    } else {
+      $("f-alt").textContent = "Inconnue";
+    }
+    $("f-spd").textContent = typeof ac.gs === "number" ? `${Math.round(ac.gs * 1.852)} km/h` : "Inconnue";
+    $("f-trk").textContent = typeof ac.track === "number" ? `${Math.round(ac.track)}°` : "Inconnu";
+    $("info").style.display = "block";
+    trailLine.setLatLngs(p.trail);
+  }
+
+  $("close").addEventListener("click", () => select(null));
+  map.on("click", () => select(null));
+
+  // ---------- Chargement des données ----------
+  async function refresh() {
+    if (busy) return;
+    busy = true;
+    const c = map.getCenter().wrap();
+    let nm = Math.ceil(map.getCenter().distanceTo(map.getBounds().getNorthEast()) / 1852);
+    const tooWide = nm > MAX_NM;
+    nm = Math.min(nm, MAX_NM);
+    try {
+      const res = await fetch(`${API}/lat/${c.lat.toFixed(3)}/lon/${c.lng.toFixed(3)}/dist/${nm}`);
+      if (!res.ok) throw new Error("code " + res.status);
+      const data = await res.json();
+      updatePlanes(data.ac || []);
+      setStatus(`${planes.size} avions` + (tooWide ? " (zoomez pour voir toute la zone)" : ""));
+    } catch (err) {
+      setStatus("Erreur de chargement : " + err.message);
+    }
+    busy = false;
+  }
+
+  map.on("moveend", refresh);
+  setInterval(refresh, REFRESH_MS);
+  refresh();
+</script>
+</body>
+</html>
