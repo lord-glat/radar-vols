@@ -8,7 +8,7 @@
 <style>
   html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; background: #0e1a24; color: #e8f0f5; }
   #map { position: absolute; inset: 0; background: #0e1a24; }
-  #status { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1000;
+  #status { position: absolute; top: 60px; left: 50%; transform: translateX(-50%); z-index: 1000;
             background: #0e1a24ee; padding: 6px 14px; border-radius: 6px; font-size: 13px; max-width: 86vw; text-align: center; box-sizing: border-box; }
   #info { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1000; display: none;
           background: #0e1a24f5; border-top: 2px solid #f2c14e; padding: 12px 16px 16px; }
@@ -19,10 +19,19 @@
   #close { position: absolute; top: 8px; right: 12px; background: none; border: 0; color: #e8f0f5; font-size: 26px; cursor: pointer; }
   #close:focus-visible { outline: 2px solid #f2c14e; }
   .plane { transition: transform 0.4s linear; }
+  #search { position: absolute; top: 10px; left: 10px; right: 10px; z-index: 1000; display: flex; gap: 8px; }
+  #q { flex: 1; min-width: 0; padding: 10px 12px; font-size: 16px; border: 0; border-radius: 8px; background: #fff; color: #0e1a24; }
+  #go { padding: 10px 16px; font-size: 15px; font-weight: 600; border: 0; border-radius: 8px; background: #f2c14e; color: #0e1a24; cursor: pointer; }
+  #q:focus-visible, #go:focus-visible { outline: 2px solid #3d6fe0; }
+  .leaflet-top { top: 104px; }
 </style>
 </head>
 <body>
 <div id="map"></div>
+<div id="search">
+  <input id="q" type="search" placeholder="Vol (AFR123) ou immat. (F-GKXA)" autocapitalize="characters" autocomplete="off" aria-label="Rechercher un vol ou une immatriculation">
+  <button id="go">Chercher</button>
+</div>
 <div id="status">Chargement…</div>
 <div id="info">
   <button id="close" aria-label="Fermer la fiche">×</button>
@@ -101,25 +110,30 @@
   }
 
   // ---------- Mise à jour des avions ----------
+  // Crée ou met à jour un avion sur la carte (renvoie false si sa position est inconnue)
+  function upsert(ac) {
+    if (typeof ac.lat !== "number" || typeof ac.lon !== "number") return false;
+    const hex = ac.hex;
+    let p = planes.get(hex);
+    if (!p) {
+      const marker = L.marker([ac.lat, ac.lon], { icon: planeIcon(ac) }).addTo(map);
+      marker.on("click", () => select(hex));
+      p = { marker, trail: [], ac };
+      planes.set(hex, p);
+    } else {
+      p.marker.setLatLng([ac.lat, ac.lon]);
+      p.marker.setIcon(planeIcon(ac));
+    }
+    p.ac = ac;
+    p.trail.push([ac.lat, ac.lon]);
+    if (p.trail.length > 150) p.trail.shift();
+    return true;
+  }
+
   function updatePlanes(list) {
     const seen = new Set();
     for (const ac of list) {
-      if (typeof ac.lat !== "number" || typeof ac.lon !== "number") continue;
-      const hex = ac.hex;
-      seen.add(hex);
-      let p = planes.get(hex);
-      if (!p) {
-        const marker = L.marker([ac.lat, ac.lon], { icon: planeIcon(ac) }).addTo(map);
-        marker.on("click", () => select(hex));
-        p = { marker, trail: [], ac };
-        planes.set(hex, p);
-      } else {
-        p.marker.setLatLng([ac.lat, ac.lon]);
-        p.marker.setIcon(planeIcon(ac));
-      }
-      p.ac = ac;
-      p.trail.push([ac.lat, ac.lon]);
-      if (p.trail.length > 150) p.trail.shift();
+      if (upsert(ac)) seen.add(ac.hex);
     }
     // Retire les avions qui ne sont plus dans la zone
     for (const [hex, p] of planes) {
@@ -187,6 +201,43 @@
     if (!ok) setStatus("Aucune source disponible. " + errors.join(" | "));
     busy = false;
   }
+
+  // ---------- Recherche par vol ou immatriculation ----------
+  // Sources qui savent chercher un avion précis (adresses non vérifiées d’ici)
+  const SEARCH_SOURCES = ["https://api.adsb.lol/v2", "https://api.airplanes.live/v2"];
+
+  async function fetchAircraft(url) {
+    const res = await fetch(PROXY ? PROXY + "?u=" + encodeURIComponent(url) : url);
+    if (!res.ok) throw new Error("code " + res.status);
+    const data = await res.json();
+    return (data.ac || data.aircraft || []).filter((a) => typeof a.lat === "number" && typeof a.lon === "number");
+  }
+
+  async function search() {
+    const q = $("q").value.trim().toUpperCase().replace(/\s+/g, "");
+    if (!q) return;
+    setStatus("Recherche de " + q + "…");
+    const code = encodeURIComponent(q);
+    for (const base of SEARCH_SOURCES) {
+      for (const kind of ["callsign", "reg"]) {
+        try {
+          const found = await fetchAircraft(`${base}/${kind}/${code}`);
+          if (found.length) {
+            const ac = found[0];
+            upsert(ac);
+            map.setView([ac.lat, ac.lon], 9);
+            select(ac.hex);
+            setStatus("Trouvé : " + ((ac.flight || "").trim() || ac.r || ac.hex));
+            return;
+          }
+        } catch (err) { /* on essaie la source suivante */ }
+      }
+    }
+    setStatus("Aucun avion en vol trouvé pour « " + q + " »");
+  }
+
+  $("go").addEventListener("click", search);
+  $("q").addEventListener("keydown", (e) => { if (e.key === "Enter") search(); });
 
   // Attend 1,5 s après la fin du déplacement de la carte avant de recharger
   let moveTimer = null;
