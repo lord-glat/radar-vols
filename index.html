@@ -6,11 +6,12 @@
 <title>Radar de vols</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
+  :root { --bar: 56px; }
   html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; background: #0e1a24; color: #e8f0f5; }
-  #map { position: absolute; inset: 0; background: #0e1a24; }
+  #map { position: absolute; inset: 0 0 var(--bar) 0; background: #0e1a24; }
   #status { position: absolute; top: 60px; left: 50%; transform: translateX(-50%); z-index: 1000;
             background: #0e1a24ee; padding: 6px 14px; border-radius: 6px; font-size: 13px; max-width: 86vw; text-align: center; box-sizing: border-box; }
-  #info { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1000; display: none;
+  #info { position: absolute; left: 0; right: 0; bottom: var(--bar); z-index: 1000; display: none;
           background: #0e1a24f5; border-top: 2px solid #f2c14e; padding: 12px 16px 16px; }
   #info h2 { margin: 0 0 8px; font-size: 20px; }
   #info dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0; font-size: 14px; }
@@ -41,6 +42,14 @@
   #filters #air-list button[aria-selected="true"] { background: #f2c14e; font-weight: 600; }
   #info { max-height: 50vh; overflow-y: auto; }
   #info p { margin: 0 0 8px; color: #8fa6b5; font-size: 14px; }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; height: var(--bar); z-index: 1100; display: grid;
+         grid-template-columns: 1fr 1fr 1fr; gap: 8px; align-items: center; padding: 0 10px; box-sizing: border-box;
+         background: #0e1a24; border-top: 1px solid #24394a; }
+  #bar button { padding: 10px 0; font-size: 16px; font-weight: 600; border: 0; border-radius: 8px; background: transparent; color: #8fa6b5; cursor: pointer; }
+  #bar button[aria-pressed="true"] { background: #f2c14e; color: #0e1a24; }
+  #bar button:focus-visible, #f-actions button:focus-visible { outline: 2px solid #3d6fe0; }
+  #f-actions { margin-top: 10px; display: flex; gap: 8px; }
+  #f-actions button { padding: 9px 14px; font-size: 15px; font-weight: 600; border: 0; border-radius: 8px; background: #f2c14e; color: #0e1a24; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -74,7 +83,17 @@
   <h2 id="f-call"></h2>
   <p id="f-sub"></p>
   <dl id="f-list"></dl>
+  <div id="f-actions">
+    <button id="f-follow">Suivre</button>
+    <button id="f-center" style="display:none">Recentrer</button>
+  </div>
 </div>
+
+<nav id="bar" aria-label="Navigation">
+  <span></span>
+  <button id="tab-map" aria-pressed="true">Carte</button>
+  <button id="tab-route" aria-pressed="false">Itinéraire</button>
+</nav>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
@@ -145,6 +164,7 @@
   const filters = { ground: true, low: true, mid: true, high: true, airlines: [], types: [] };
 
   function matches(ac) {
+    if (followHex) return ac.hex === followHex;   // en mode suivi, on ne garde que cet avion
     const a = ac.alt_baro;
     if (a === "ground") {
       if (!filters.ground) return false;
@@ -328,7 +348,11 @@
   }
 
   // ---------- Fiche de l’avion sélectionné ----------
-  function select(hex) { selected = hex; showInfo(); }
+  function select(hex) {
+    selected = hex;
+    if (pendingRoute && hex) { startFollow(hex, true); return; }
+    showInfo();
+  }
 
   function showInfo() {
     const p = selected && planes.get(selected);
@@ -357,9 +381,13 @@
       ["Code ICAO", (ac.hex || "").toUpperCase()],
       ["Dernier signal", typeof ac.seen === "number" ? `il y a ${Math.round(ac.seen)} s` : ""]
     ];
+    const following = followHex && followHex === selected;
+    const list = following ? followRows(ac, altText) : rows;
+    $("f-follow").textContent = following ? "Arrêter le suivi" : "Suivre";
+    $("f-center").style.display = following && !followCenter ? "inline-block" : "none";
     const dl = $("f-list");
     dl.textContent = "";
-    for (const [label, value] of rows) {
+    for (const [label, value] of list) {
       if (!value) continue;
       const dt = document.createElement("dt");
       dt.textContent = label;
@@ -372,12 +400,13 @@
   }
 
   $("close").addEventListener("click", () => select(null));
-  map.on("click", () => select(null));
+  map.on("click", () => { if (!followHex) select(null); });
 
   // ---------- Chargement des données ----------
   async function refresh() {
     if (busy) return;
     busy = true;
+    if (followHex) { await refreshFollowed(); busy = false; return; }
     const c = map.getCenter().wrap();
     let nm = Math.ceil(map.getCenter().distanceTo(map.getBounds().getNorthEast()) / 1852);
     const tooWide = nm > MAX_NM;
@@ -436,8 +465,154 @@
     if (sp) {
       const c = sp.marker.getLatLng();
       trailLine.setLatLngs([...sp.trail, [c.lat, c.lng]]);
+      if (followHex === selected && followCenter) map.panTo(c, { animate: false });
     }
   }, 100);
+
+  // ---------- Suivi et itinéraire ----------
+  let followHex = null, routeMode = false, followCenter = true, pendingRoute = false;
+  let followStart = 0, followRoute = null, wasAirborne = false, landed = false;
+  const routeLayer = L.layerGroup().addTo(map);
+
+  const distKm = (a, b) => {
+    const r = Math.PI / 180;
+    const h = Math.sin(((b[0] - a[0]) * r) / 2) ** 2 +
+      Math.cos(a[0] * r) * Math.cos(b[0] * r) * Math.sin(((b[1] - a[1]) * r) / 2) ** 2;
+    return 2 * 6371 * Math.asin(Math.sqrt(h));
+  };
+
+  // Points d’une ligne droite « sur la sphère » entre deux aéroports (trajet théorique)
+  function greatCircle(a, b, n = 64) {
+    const r = Math.PI / 180, deg = 180 / Math.PI;
+    const [la1, lo1, la2, lo2] = [a[0] * r, a[1] * r, b[0] * r, b[1] * r];
+    const d = distKm(a, b) / 6371;
+    if (!d) return [a];
+    const pts = [];
+    for (let i = 0; i <= n; i++) {
+      const f = i / n, A = Math.sin((1 - f) * d) / Math.sin(d), B = Math.sin(f * d) / Math.sin(d);
+      const x = A * Math.cos(la1) * Math.cos(lo1) + B * Math.cos(la2) * Math.cos(lo2);
+      const y = A * Math.cos(la1) * Math.sin(lo1) + B * Math.cos(la2) * Math.sin(lo2);
+      const z = A * Math.sin(la1) + B * Math.sin(la2);
+      pts.push([Math.atan2(z, Math.sqrt(x * x + y * y)) * deg, Math.atan2(y, x) * deg]);
+    }
+    return pts;
+  }
+
+  // Départ et arrivée d’un vol (base communautaire adsbdb : peut être absente ou inexacte)
+  async function getRoute(cs) {
+    if (!cs) return null;
+    try {
+      const url = "https://api.adsbdb.com/v0/callsign/" + encodeURIComponent(cs);
+      const res = await fetch(PROXY ? PROXY + "?u=" + encodeURIComponent(url) : url);
+      if (!res.ok) return null;
+      const fr = (await res.json()).response?.flightroute;
+      return fr && fr.origin && fr.destination ? fr : null;
+    } catch (err) { return null; }
+  }
+
+  const fmtAirport = (a) => a ? `${a.municipality || a.name}${a.iata_code ? " (" + a.iata_code + ")" : ""}` : "";
+  const hhmm = (t) => new Date(t).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+
+  // Fiche de suivi : uniquement l’essentiel
+  function followRows(ac, altText) {
+    const r = followRoute;
+    let eta = "", rest = "";
+    if (r && typeof ac.gs === "number" && ac.gs > 50 && !landed) {
+      const km = distKm([ac.lat, ac.lon], [r.destination.latitude, r.destination.longitude]);
+      const min = Math.round((km / (ac.gs * 1.852)) * 60);
+      eta = (min >= 60 ? Math.floor(min / 60) + " h " + String(min % 60).padStart(2, "0") + " min" : min + " min") +
+            ` (vers ${hhmm(Date.now() + min * 60000)})`;
+      rest = Math.round(km).toLocaleString("fr-FR") + " km";
+    }
+    return [
+      ["Départ", r ? fmtAirport(r.origin) : ""],
+      ["Arrivée", r ? fmtAirport(r.destination) : "Inconnue (trajet introuvable)"],
+      ["Statut", landed ? "Atterri ✔" : ac.alt_baro === "ground" ? "Au sol" : "En vol"],
+      ["Suivi depuis", hhmm(followStart)],
+      ["Arrivée estimée", eta],
+      ["Distance restante", rest],
+      ["Vitesse", typeof ac.gs === "number" ? `${Math.round(ac.gs * 1.852)} km/h` : ""],
+      ["Altitude", altText]
+    ];
+  }
+
+  function refilter() { for (const p of planes.values()) applyFilter(p); }
+
+  function updateTabs() {
+    $("tab-map").setAttribute("aria-pressed", String(!followHex && !pendingRoute));
+    $("tab-route").setAttribute("aria-pressed", String(routeMode || pendingRoute));
+  }
+
+  function drawRoute() {
+    routeLayer.clearLayers();
+    const r = followRoute, p = planes.get(followHex);
+    if (!r || !p) return;
+    const a = [r.origin.latitude, r.origin.longitude], b = [r.destination.latitude, r.destination.longitude];
+    L.polyline(greatCircle(a, b), { color: "#3d6fe0", weight: 2, dashArray: "6 8" }).addTo(routeLayer);
+    for (const [pt, ap] of [[a, r.origin], [b, r.destination]]) {
+      L.circleMarker(pt, { radius: 6, color: "#0e1a24", weight: 2, fillColor: "#fff", fillOpacity: 1 })
+        .bindTooltip(ap.iata_code || ap.icao_code || ap.municipality || "", { permanent: true, direction: "top" })
+        .addTo(routeLayer);
+    }
+    map.fitBounds(L.latLngBounds([a, b, p.marker.getLatLng()]), { padding: [50, 50] });
+  }
+
+  async function startFollow(hex, withRoute) {
+    const p = planes.get(hex);
+    if (!p) return;
+    followHex = hex; selected = hex; routeMode = withRoute; followCenter = !withRoute; pendingRoute = false;
+    followStart = Date.now(); followRoute = null; wasAirborne = false; landed = false;
+    routeLayer.clearLayers();
+    refilter(); updateTabs(); showInfo();
+    setStatus("Suivi en direct");
+    const route = await getRoute((p.ac.flight || "").trim());
+    if (followHex !== hex) return;
+    followRoute = route;
+    if (withRoute) {
+      if (route) drawRoute(); else followCenter = true;   // pas d’itinéraire connu : on suit simplement l’avion
+    }
+    showInfo();
+  }
+
+  function stopFollow() {
+    followHex = null; routeMode = false; pendingRoute = false; followRoute = null; followCenter = true;
+    routeLayer.clearLayers();
+    refilter(); updateTabs(); showInfo(); refresh();
+  }
+
+  // En suivi, on interroge directement cet avion (même s’il sort de l’écran)
+  async function refreshFollowed() {
+    for (const base of SEARCH_SOURCES) {
+      try {
+        const found = await fetchAircraft(`${base}/hex/${followHex}`);
+        if (found.length) {
+          const ac = found[0];
+          upsert(ac);
+          if (typeof ac.alt_baro === "number" && ac.alt_baro > 100) wasAirborne = true;
+          if (wasAirborne && ac.alt_baro === "ground") landed = true;
+          showInfo();
+          setStatus(landed ? "Atterri" : "Suivi en direct");
+          return;
+        }
+      } catch (err) { /* source suivante */ }
+    }
+    setStatus("Signal perdu, nouvelle tentative…");
+  }
+
+  $("f-follow").addEventListener("click", () => {
+    if (followHex && followHex === selected) stopFollow(); else if (selected) startFollow(selected, false);
+  });
+  $("f-center").addEventListener("click", () => { followCenter = true; showInfo(); });
+  map.on("dragstart", () => { if (followHex) { followCenter = false; showInfo(); } });
+
+  $("tab-map").addEventListener("click", () => { if (followHex || pendingRoute) stopFollow(); });
+  $("tab-route").addEventListener("click", () => {
+    if (routeMode) return;
+    if (selected && planes.get(selected)) { startFollow(selected, true); return; }
+    pendingRoute = true;
+    updateTabs();
+    setStatus("Touchez un avion pour voir son itinéraire");
+  });
 
   // ---------- Recherche par vol ou immatriculation ----------
   // Sources qui savent chercher un avion précis (adresses non vérifiées d’ici)
