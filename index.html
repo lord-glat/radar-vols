@@ -33,6 +33,14 @@
   #filters input[type=text] { width: 100%; box-sizing: border-box; padding: 8px; font-size: 16px; border: 0; border-radius: 6px; margin-bottom: 8px; }
   #filters button { padding: 8px 12px; font-size: 14px; font-weight: 600; border: 0; border-radius: 6px; background: #f2c14e; color: #0e1a24; margin-right: 6px; cursor: pointer; }
   #fbtn:focus-visible, #filters button:focus-visible { outline: 2px solid #3d6fe0; }
+  #filters #air-btn { display: block; width: 100%; margin: 0 0 8px; text-align: left; background: #fff; font-weight: 400; font-size: 16px; padding: 10px 8px; }
+  #air-box { display: none; margin-bottom: 8px; background: #fff; border-radius: 6px; padding: 6px; }
+  #air-q { width: 100%; box-sizing: border-box; padding: 8px; font-size: 16px; border: 1px solid #c5d0d8; border-radius: 6px; margin-bottom: 4px; background: #fff; color: #0e1a24; }
+  #air-list { max-height: 170px; overflow-y: auto; color: #0e1a24; }
+  #filters #air-list button { display: block; width: 100%; margin: 0; text-align: left; background: none; font-weight: 400; font-size: 15px; padding: 8px; color: #0e1a24; }
+  #filters #air-list button[aria-selected="true"] { background: #f2c14e; font-weight: 600; }
+  #info { max-height: 50vh; overflow-y: auto; }
+  #info p { margin: 0 0 8px; color: #8fa6b5; font-size: 14px; }
 </style>
 </head>
 <body>
@@ -50,8 +58,12 @@
     <label><input type="checkbox" id="flt-mid" checked> Moyenne (10 000 à 25 000 ft)</label>
     <label><input type="checkbox" id="flt-high" checked> Haute (plus de 25 000 ft)</label>
   </fieldset>
-  <label for="flt-air">Compagnie (nom ou code)</label>
-  <input type="text" id="flt-air" placeholder="Transavia, Air France, RYR" autocomplete="off">
+  <label for="air-btn">Compagnie</label>
+  <button type="button" id="air-btn" aria-expanded="false" aria-controls="air-box">Toutes les compagnies ▾</button>
+  <div id="air-box">
+    <input type="search" id="air-q" placeholder="Rechercher une compagnie…" autocomplete="off" aria-label="Rechercher une compagnie">
+    <div id="air-list"></div>
+  </div>
   <label for="flt-type">Type d’appareil</label>
   <input type="text" id="flt-type" placeholder="A320, B738" autocapitalize="characters" autocomplete="off">
   <button id="flt-pos">Ma position</button><button id="flt-reset">Réinitialiser</button>
@@ -60,13 +72,8 @@
 <div id="info">
   <button id="close" aria-label="Fermer la fiche">×</button>
   <h2 id="f-call"></h2>
-  <dl>
-    <dt>Immatriculation</dt><dd id="f-reg"></dd>
-    <dt>Type d’appareil</dt><dd id="f-type"></dd>
-    <dt>Altitude</dt><dd id="f-alt"></dd>
-    <dt>Vitesse</dt><dd id="f-spd"></dd>
-    <dt>Cap</dt><dd id="f-trk"></dd>
-  </dl>
+  <p id="f-sub"></p>
+  <dl id="f-list"></dl>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -185,20 +192,70 @@
 
   const norm = (s) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
 
-  // « Transavia, AFR » → ["TVF", "TRA", "AFR"]
-  function expandAirlines(text) {
-    const out = [];
-    for (const item of text.split(/[,;]+/).map(norm).filter(Boolean)) {
-      const key = AIRLINES[item] ? item : (item.length >= 4 ? Object.keys(AIRLINES).find((k) => k.startsWith(item)) : null);
-      if (key) out.push(...AIRLINES[key]);
-      else out.push(...item.toUpperCase().split(/\s+/));
-    }
-    return out;
+  const title = (k) => k.replace(/\b\w/g, (c) => c.toUpperCase());
+  let airlineChoice = null;   // null = toutes les compagnies
+
+  // Retrouve le nom de la compagnie à partir du début de l’indicatif (AFR1234 → Air France)
+  function airlineFromCallsign(cs) {
+    const code = (cs || "").slice(0, 3).toUpperCase();
+    const key = Object.keys(AIRLINES).find((k) => AIRLINES[k].includes(code));
+    return key ? title(key) : "";
   }
+
+  function closeAir() {
+    $("air-box").style.display = "none";
+    $("air-btn").setAttribute("aria-expanded", "false");
+  }
+
+  function resetAirline() {
+    airlineChoice = null;
+    $("air-btn").textContent = "Toutes les compagnies ▾";
+    closeAir();
+  }
+
+  function renderAirlineList() {
+    const raw = $("air-q").value;
+    const q = norm(raw);
+    const list = $("air-list");
+    list.textContent = "";
+    const add = (label, choice) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = label;
+      const selected = choice ? !!airlineChoice && airlineChoice.label === choice.label : !airlineChoice;
+      btn.setAttribute("aria-selected", String(selected));
+      btn.addEventListener("click", () => {
+        airlineChoice = choice;
+        $("air-btn").textContent = (choice ? choice.label : "Toutes les compagnies") + " ▾";
+        closeAir();
+        readFilters();
+      });
+      list.appendChild(btn);
+    };
+    if (!q) add("Toutes les compagnies", null);
+    for (const k of Object.keys(AIRLINES).sort()) {
+      if (!q || norm(k).includes(q)) add(title(k), { label: title(k), codes: AIRLINES[k] });
+    }
+    // Compagnie absente de la liste : on peut saisir son code à 3 ou 4 lettres
+    const code = raw.trim().toUpperCase();
+    if (/^[A-Z]{3,4}$/.test(code)) add("Utiliser le code " + code, { label: code, codes: [code] });
+    if (!list.children.length) list.textContent = "Aucun résultat";
+  }
+
+  $("air-btn").addEventListener("click", () => {
+    const open = $("air-box").style.display !== "block";
+    if (!open) { closeAir(); return; }
+    $("air-box").style.display = "block";
+    $("air-btn").setAttribute("aria-expanded", "true");
+    $("air-q").value = "";
+    renderAirlineList();
+    $("air-q").focus();
+  });
+  $("air-q").addEventListener("input", renderAirlineList);
 
   function readFilters() {
     for (const k of ["ground", "low", "mid", "high"]) filters[k] = $("flt-" + k).checked;
-    filters.airlines = expandAirlines($("flt-air").value);
+    filters.airlines = airlineChoice ? airlineChoice.codes : [];
     filters.types = words($("flt-type").value);
     for (const p of planes.values()) applyFilter(p);
     setStatus(`${countVisible()} sur ${planes.size} avions affichés`);
@@ -215,7 +272,7 @@
 
   $("flt-reset").addEventListener("click", () => {
     for (const k of ["ground", "low", "mid", "high"]) $("flt-" + k).checked = true;
-    $("flt-air").value = "";
+    resetAirline();
     $("flt-type").value = "";
     readFilters();
   });
@@ -277,18 +334,39 @@
     const p = selected && planes.get(selected);
     if (!p) { $("info").style.display = "none"; trailLine.setLatLngs([]); return; }
     const ac = p.ac;
-    $("f-call").textContent = (ac.flight || "").trim() || "Sans indicatif";
-    $("f-reg").textContent = ac.r || "Inconnue";
-    $("f-type").textContent = ac.t || "Inconnu";
-    if (ac.alt_baro === "ground") {
-      $("f-alt").textContent = "Au sol";
-    } else if (typeof ac.alt_baro === "number") {
-      $("f-alt").textContent = `${Math.round(ac.alt_baro * 0.3048).toLocaleString("fr-FR")} m (${ac.alt_baro.toLocaleString("fr-FR")} ft)`;
-    } else {
-      $("f-alt").textContent = "Inconnue";
+    const cs = (ac.flight || "").trim();
+    $("f-call").textContent = cs || ac.r || "Sans indicatif";
+    $("f-sub").textContent = ac.ownOp || airlineFromCallsign(cs) || "";
+    const alt = ac.alt_baro;
+    const altText = alt === "ground" ? "Au sol"
+      : typeof alt === "number" ? `${Math.round(alt * 0.3048).toLocaleString("fr-FR")} m (${alt.toLocaleString("fr-FR")} ft)` : "";
+    const vr = ac.baro_rate;
+    const vrText = typeof vr !== "number" ? ""
+      : Math.abs(vr) < 300 ? "En palier"
+      : `${vr > 0 ? "▲ Monte" : "▼ Descend"} (${Math.abs(Math.round(vr)).toLocaleString("fr-FR")} ft/min)`;
+    const sq = ac.squawk;
+    const sqText = !sq ? "" : sq + ({ "7500": " (détournement)", "7600": " (panne radio)", "7700": " (urgence)" }[sq] || "");
+    const rows = [
+      ["Appareil", ac.desc ? ac.desc + (ac.t ? ` (${ac.t})` : "") : ac.t],
+      ["Immatriculation", ac.r],
+      ["Altitude", altText],
+      ["Vitesse sol", typeof ac.gs === "number" ? `${Math.round(ac.gs * 1.852)} km/h (${Math.round(ac.gs)} nœuds)` : ""],
+      ["Vitesse verticale", vrText],
+      ["Cap", typeof ac.track === "number" ? `${Math.round(ac.track)}°` : ""],
+      ["Transpondeur", sqText],
+      ["Code ICAO", (ac.hex || "").toUpperCase()],
+      ["Dernier signal", typeof ac.seen === "number" ? `il y a ${Math.round(ac.seen)} s` : ""]
+    ];
+    const dl = $("f-list");
+    dl.textContent = "";
+    for (const [label, value] of rows) {
+      if (!value) continue;
+      const dt = document.createElement("dt");
+      dt.textContent = label;
+      const dd = document.createElement("dd");
+      dd.textContent = value;
+      dl.append(dt, dd);
     }
-    $("f-spd").textContent = typeof ac.gs === "number" ? `${Math.round(ac.gs * 1.852)} km/h` : "Inconnue";
-    $("f-trk").textContent = typeof ac.track === "number" ? `${Math.round(ac.track)}°` : "Inconnu";
     $("info").style.display = "block";
     trailLine.setLatLngs(p.trail);
   }
