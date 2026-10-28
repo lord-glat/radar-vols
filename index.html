@@ -24,6 +24,15 @@
   #go { padding: 10px 16px; font-size: 15px; font-weight: 600; border: 0; border-radius: 8px; background: #f2c14e; color: #0e1a24; cursor: pointer; }
   #q:focus-visible, #go:focus-visible { outline: 2px solid #3d6fe0; }
   .leaflet-top { top: 104px; }
+  #fbtn { padding: 10px 12px; font-size: 15px; font-weight: 600; border: 0; border-radius: 8px; background: #dfe9f0; color: #0e1a24; cursor: pointer; }
+  #filters { position: absolute; top: 104px; right: 10px; z-index: 1000; width: min(270px, 72vw); display: none;
+             background: #0e1a24f5; padding: 12px 14px; border-radius: 10px; font-size: 14px; }
+  #filters fieldset { border: 0; margin: 0 0 10px; padding: 0; }
+  #filters legend { color: #8fa6b5; padding: 0; margin-bottom: 4px; }
+  #filters label { display: block; padding: 3px 0; }
+  #filters input[type=text] { width: 100%; box-sizing: border-box; padding: 8px; font-size: 16px; border: 0; border-radius: 6px; margin-bottom: 8px; }
+  #filters button { padding: 8px 12px; font-size: 14px; font-weight: 600; border: 0; border-radius: 6px; background: #f2c14e; color: #0e1a24; margin-right: 6px; cursor: pointer; }
+  #fbtn:focus-visible, #filters button:focus-visible { outline: 2px solid #3d6fe0; }
 </style>
 </head>
 <body>
@@ -31,6 +40,21 @@
 <div id="search">
   <input id="q" type="search" placeholder="Vol (AFR123) ou immat. (F-GKXA)" autocapitalize="characters" autocomplete="off" aria-label="Rechercher un vol ou une immatriculation">
   <button id="go">Chercher</button>
+  <button id="fbtn" aria-expanded="false" aria-controls="filters">Filtres</button>
+</div>
+<div id="filters">
+  <fieldset>
+    <legend>Altitude</legend>
+    <label><input type="checkbox" id="flt-ground" checked> Au sol</label>
+    <label><input type="checkbox" id="flt-low" checked> Basse (moins de 10 000 ft)</label>
+    <label><input type="checkbox" id="flt-mid" checked> Moyenne (10 000 à 25 000 ft)</label>
+    <label><input type="checkbox" id="flt-high" checked> Haute (plus de 25 000 ft)</label>
+  </fieldset>
+  <label for="flt-air">Compagnie (nom ou code)</label>
+  <input type="text" id="flt-air" placeholder="Transavia, Air France, RYR" autocomplete="off">
+  <label for="flt-type">Type d’appareil</label>
+  <input type="text" id="flt-type" placeholder="A320, B738" autocapitalize="characters" autocomplete="off">
+  <button id="flt-pos">Ma position</button><button id="flt-reset">Réinitialiser</button>
 </div>
 <div id="status">Chargement…</div>
 <div id="info">
@@ -73,7 +97,7 @@
   // Adresse de votre relais Cloudflare (laissez vide tant que vous n’en avez pas)
   // Exemple : "https://radar-relais.votrenom.workers.dev/"
   const PROXY = "https://radar-relais.glatignyhugo.workers.dev/";
-  const REFRESH_MS = 15000;                 // rafraîchissement toutes les 15 s
+  const REFRESH_MS = 10000;                 // rafraîchissement toutes les 10 s
   const MAX_NM = 250;                       // rayon maximum accepté par l’API (milles nautiques)
 
   // ---------- Carte ----------
@@ -110,21 +134,125 @@
   }
 
   // ---------- Mise à jour des avions ----------
+  // ---------- Filtres ----------
+  const filters = { ground: true, low: true, mid: true, high: true, airlines: [], types: [] };
+
+  function matches(ac) {
+    const a = ac.alt_baro;
+    if (a === "ground") {
+      if (!filters.ground) return false;
+    } else if (typeof a === "number") {
+      const band = a < 10000 ? "low" : a < 25000 ? "mid" : "high";
+      if (!filters[band]) return false;
+    }
+    if (filters.airlines.length) {
+      const cs = (ac.flight || "").trim().toUpperCase();
+      if (!filters.airlines.some((c) => cs.startsWith(c))) return false;
+    }
+    if (filters.types.length) {
+      const t = (ac.t || "").toUpperCase();
+      if (!filters.types.some((x) => t.startsWith(x))) return false;
+    }
+    return true;
+  }
+
+  function applyFilter(p) {
+    const show = matches(p.ac);
+    if (show && !map.hasLayer(p.marker)) p.marker.addTo(map);
+    if (!show && map.hasLayer(p.marker)) p.marker.remove();
+  }
+
+  function countVisible() {
+    let n = 0;
+    for (const p of planes.values()) if (map.hasLayer(p.marker)) n++;
+    return n;
+  }
+
+  const words = (text) => text.toUpperCase().split(/[\s,;]+/).filter(Boolean);
+
+  // Noms de compagnies courantes → codes d’indicatif (liste non exhaustive, à compléter)
+  const AIRLINES = {
+    "transavia": ["TVF", "TRA"], "air france": ["AFR"], "hop": ["HOP"], "ryanair": ["RYR", "RUK"],
+    "easyjet": ["EZY", "EJU", "EZS"], "vueling": ["VLG"], "lufthansa": ["DLH"], "british airways": ["BAW"],
+    "klm": ["KLM"], "volotea": ["VOE"], "wizz air": ["WZZ", "WMT"], "iberia": ["IBE"], "air europa": ["AEA"],
+    "tap": ["TAP"], "emirates": ["UAE"], "qatar": ["QTR"], "turkish": ["THY"], "norwegian": ["NAX", "NSZ"],
+    "delta": ["DAL"], "united": ["UAL"], "american": ["AAL"], "air canada": ["ACA"], "swiss": ["SWR"],
+    "brussels": ["BEL"], "austrian": ["AUA"], "sas": ["SAS"], "finnair": ["FIN"], "aer lingus": ["EIN"],
+    "ita": ["ITY"], "jet2": ["EXS"], "tui": ["TUI", "TOM", "TUB"], "corsair": ["CRL"], "french bee": ["FBU"],
+    "air caraibes": ["FWI"], "royal air maroc": ["RAM"], "tunisair": ["TAR"], "air algerie": ["DAH"],
+    "etihad": ["ETD"], "air transat": ["TSC"], "fedex": ["FDX"], "ups": ["UPS"], "dhl": ["DHK", "BCS"]
+  };
+
+  const norm = (s) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+
+  // « Transavia, AFR » → ["TVF", "TRA", "AFR"]
+  function expandAirlines(text) {
+    const out = [];
+    for (const item of text.split(/[,;]+/).map(norm).filter(Boolean)) {
+      const key = AIRLINES[item] ? item : (item.length >= 4 ? Object.keys(AIRLINES).find((k) => k.startsWith(item)) : null);
+      if (key) out.push(...AIRLINES[key]);
+      else out.push(...item.toUpperCase().split(/\s+/));
+    }
+    return out;
+  }
+
+  function readFilters() {
+    for (const k of ["ground", "low", "mid", "high"]) filters[k] = $("flt-" + k).checked;
+    filters.airlines = expandAirlines($("flt-air").value);
+    filters.types = words($("flt-type").value);
+    for (const p of planes.values()) applyFilter(p);
+    setStatus(`${countVisible()} sur ${planes.size} avions affichés`);
+  }
+
+  $("filters").addEventListener("input", readFilters);
+  $("filters").addEventListener("change", readFilters);
+
+  $("fbtn").addEventListener("click", () => {
+    const open = $("filters").style.display !== "block";
+    $("filters").style.display = open ? "block" : "none";
+    $("fbtn").setAttribute("aria-expanded", open);
+  });
+
+  $("flt-reset").addEventListener("click", () => {
+    for (const k of ["ground", "low", "mid", "high"]) $("flt-" + k).checked = true;
+    $("flt-air").value = "";
+    $("flt-type").value = "";
+    readFilters();
+  });
+
+  $("flt-pos").addEventListener("click", () => {
+    if (!navigator.geolocation) { setStatus("Position non disponible sur cet appareil"); return; }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => map.setView([pos.coords.latitude, pos.coords.longitude], 9),
+      () => setStatus("Position refusée : autorisez-la dans les réglages du navigateur")
+    );
+  });
+
   // Crée ou met à jour un avion sur la carte (renvoie false si sa position est inconnue)
   function upsert(ac) {
     if (typeof ac.lat !== "number" || typeof ac.lon !== "number") return false;
     const hex = ac.hex;
+    const now = performance.now();
+    const base = {
+      lat: ac.lat, lon: ac.lon, gs: ac.gs, track: ac.track, ground: ac.alt_baro === "ground",
+      t0: now - (typeof ac.seen_pos === "number" ? ac.seen_pos * 1000 : 0)
+    };
+    const start = estimate(base, now);
     let p = planes.get(hex);
     if (!p) {
-      const marker = L.marker([ac.lat, ac.lon], { icon: planeIcon(ac) }).addTo(map);
+      const marker = L.marker(start, { icon: planeIcon(ac) }).addTo(map);
       marker.on("click", () => select(hex));
-      p = { marker, trail: [], ac };
+      p = { marker, trail: [], ac, base, off: [0, 0] };
       planes.set(hex, p);
     } else {
-      p.marker.setLatLng([ac.lat, ac.lon]);
+      // On garde l’écart avec l’ancienne position affichée, qui se résorbe doucement
+      const cur = p.marker.getLatLng();
+      p.off = [cur.lat - start[0], cur.lng - start[1]];
+      p.base = base;
       p.marker.setIcon(planeIcon(ac));
     }
     p.ac = ac;
+    applyFilter(p);
     p.trail.push([ac.lat, ac.lon]);
     if (p.trail.length > 150) p.trail.shift();
     return true;
@@ -192,7 +320,7 @@
         updatePlanes(prov.parse ? prov.parse(data) : (data.ac || data.aircraft || []));
         current = idx;
         ok = true;
-        setStatus(`${planes.size} avions (${prov.name})` + (tooWide ? ", zoomez pour voir toute la zone" : ""));
+        setStatus(`${countVisible()} sur ${planes.size} avions (${prov.name})` + (tooWide ? ", zoomez pour voir toute la zone" : ""));
       } catch (err) {
         errors.push(prov.name + " : " + err.message);
       }
@@ -201,6 +329,37 @@
     if (!ok) setStatus("Aucune source disponible. " + errors.join(" | "));
     busy = false;
   }
+
+  // ---------- Mouvement fluide ----------
+  // Entre deux mises à jour, on estime la position d’après la vitesse et le cap
+  function estimate(b, now) {
+    const ms = Math.min(Math.max(now - b.t0, 0), 30000);
+    if (!b.gs || b.ground || typeof b.track !== "number") return [b.lat, b.lon];
+    const d = b.gs * 0.514444 * (ms / 1000);            // distance parcourue en mètres
+    const rad = (b.track * Math.PI) / 180;
+    const dLat = (d * Math.cos(rad)) / 111320;
+    const dLon = (d * Math.sin(rad)) / (111320 * Math.max(Math.cos((b.lat * Math.PI) / 180), 0.01));
+    return [b.lat + dLat, b.lon + dLon];
+  }
+
+  let lastTick = performance.now();
+  setInterval(() => {
+    const now = performance.now();
+    const k = Math.exp(-(now - lastTick) / 1000);       // résorbe l’écart de correction
+    lastTick = now;
+    for (const p of planes.values()) {
+      if (!map.hasLayer(p.marker)) continue;
+      const e = estimate(p.base, now);
+      p.off[0] *= k;
+      p.off[1] *= k;
+      p.marker.setLatLng([e[0] + p.off[0], e[1] + p.off[1]]);
+    }
+    const sp = selected && planes.get(selected);
+    if (sp) {
+      const c = sp.marker.getLatLng();
+      trailLine.setLatLngs([...sp.trail, [c.lat, c.lng]]);
+    }
+  }, 100);
 
   // ---------- Recherche par vol ou immatriculation ----------
   // Sources qui savent chercher un avion précis (adresses non vérifiées d’ici)
