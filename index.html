@@ -50,6 +50,26 @@
   #bar button:focus-visible, #f-actions button:focus-visible { outline: 2px solid #3d6fe0; }
   #f-actions { margin-top: 10px; display: flex; gap: 8px; }
   #f-actions button { padding: 9px 14px; font-size: 15px; font-weight: 600; border: 0; border-radius: 8px; background: #f2c14e; color: #0e1a24; cursor: pointer; }
+  #fc { display: none; }
+  #fc-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-right: 36px; }
+  #fc-call { font-size: 24px; font-weight: 700; color: #f2c14e; }
+  .chip { background: #3a4a57; border-radius: 4px; padding: 2px 7px; font-size: 13px; font-weight: 700; }
+  #fc-air { color: #c9d6df; margin: 2px 0 10px; }
+  .fc-box { background: #1b2b38; border-radius: 10px; padding: 10px 14px; margin-bottom: 8px; }
+  #fc-route { display: flex; justify-content: space-between; align-items: center; }
+  #fc-route div { display: flex; flex-direction: column; min-width: 90px; }
+  #fc-route div.r { text-align: right; align-items: flex-end; }
+  #fc-route b { font-size: 28px; line-height: 1.1; }
+  #fc-route small { font-size: 12px; font-weight: 600; color: #c9d6df; text-transform: uppercase; }
+  #fc-route > span { font-size: 22px; color: #f2c14e; }
+  #fc-bar { height: 6px; border-radius: 3px; background: #3a4a57; margin: 10px 0 6px; overflow: hidden; }
+  #fc-fill { height: 100%; width: 0; background: #f2c14e; }
+  #fc-times { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; color: #c9d6df; }
+  #fc-stats { display: flex; gap: 8px; margin-bottom: 8px; }
+  #fc-stats > div { flex: 1; background: #1b2b38; border-radius: 10px; padding: 8px 12px; }
+  #fc-stats small { display: block; font-size: 11px; font-weight: 600; color: #8fa6b5; }
+  #fc-stats b { font-size: 20px; }
+  #fc-foot { display: flex; justify-content: space-between; background: #1b2b38; border-radius: 10px; padding: 8px 12px; font-size: 15px; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -83,6 +103,24 @@
   <h2 id="f-call"></h2>
   <p id="f-sub"></p>
   <dl id="f-list"></dl>
+  <div id="fc">
+    <div id="fc-head"><span id="fc-call"></span><span class="chip" id="fc-iata"></span><span class="chip" id="fc-type"></span></div>
+    <div id="fc-air"></div>
+    <div class="fc-box">
+      <div id="fc-route">
+        <div><b id="fc-o">—</b><small id="fc-on"></small></div>
+        <span aria-hidden="true">✈</span>
+        <div class="r"><b id="fc-d">—</b><small id="fc-dn"></small></div>
+      </div>
+      <div id="fc-bar"><div id="fc-fill"></div></div>
+      <div id="fc-times"><span id="fc-since"></span><span id="fc-eta"></span></div>
+    </div>
+    <div id="fc-stats">
+      <div><small>ALT. BAROMÉTR.</small><b id="fc-alt"></b></div>
+      <div><small>VITESSE SOL</small><b id="fc-spd"></b></div>
+    </div>
+    <div id="fc-foot"><span id="fc-model"></span><span id="fc-reg"></span></div>
+  </div>
   <div id="f-actions">
     <button id="f-follow">Suivre</button>
     <button id="f-center" style="display:none">Recentrer</button>
@@ -350,6 +388,7 @@
   // ---------- Fiche de l’avion sélectionné ----------
   function select(hex) {
     selected = hex;
+    if (hex) sheetHidden = false;
     if (pendingRoute && hex) { startFollow(hex, true); return; }
     showInfo();
   }
@@ -357,6 +396,7 @@
   function showInfo() {
     const p = selected && planes.get(selected);
     if (!p) { $("info").style.display = "none"; trailLine.setLatLngs([]); return; }
+    if (sheetHidden) { $("info").style.display = "none"; return; }
     const ac = p.ac;
     const cs = (ac.flight || "").trim();
     $("f-call").textContent = cs || ac.r || "Sans indicatif";
@@ -382,7 +422,10 @@
       ["Dernier signal", typeof ac.seen === "number" ? `il y a ${Math.round(ac.seen)} s` : ""]
     ];
     const following = followHex && followHex === selected;
-    const list = following ? followRows(ac, altText) : rows;
+    for (const id of ["f-call", "f-sub", "f-list"]) $(id).style.display = following ? "none" : "";
+    $("fc").style.display = following ? "block" : "none";
+    if (following) fillFollowCard(ac, alt);
+    const list = rows;
     $("f-follow").textContent = following ? "Arrêter le suivi" : "Suivre";
     $("f-center").style.display = following && !followCenter ? "inline-block" : "none";
     const dl = $("f-list");
@@ -399,7 +442,10 @@
     trailLine.setLatLngs(p.trail);
   }
 
-  $("close").addEventListener("click", () => select(null));
+  $("close").addEventListener("click", () => {
+    if (followHex) { sheetHidden = true; showInfo(); }   // le suivi continue, seule la fiche se ferme
+    else select(null);
+  });
   map.on("click", () => { if (!followHex) select(null); });
 
   // ---------- Chargement des données ----------
@@ -461,17 +507,20 @@
       p.off[1] *= k;
       p.marker.setLatLng([e[0] + p.off[0], e[1] + p.off[1]]);
     }
-    const sp = selected && planes.get(selected);
+    const sp = planes.get(followHex || selected);
     if (sp) {
       const c = sp.marker.getLatLng();
-      trailLine.setLatLngs([...sp.trail, [c.lat, c.lng]]);
-      if (followHex === selected && followCenter) map.panTo(c, { animate: false });
+      // En vue Itinéraire, la ligne violette remplace la trace jaune (qui ne montre que le chemin depuis l’ouverture de la page)
+      trailLine.setLatLngs(routeMode && followRoute ? [] : [...sp.trail, [c.lat, c.lng]]);
+      if (followHex && followCenter) map.panTo(c, { animate: false });
+      updateRouteLines();
     }
   }, 100);
 
   // ---------- Suivi et itinéraire ----------
   let followHex = null, routeMode = false, followCenter = true, pendingRoute = false;
   let followStart = 0, followRoute = null, wasAirborne = false, landed = false;
+  let sheetHidden = false, routeError = "", routePast = null, routeFuture = null;
   const routeLayer = L.layerGroup().addTo(map);
 
   const distKm = (a, b) => {
@@ -500,40 +549,62 @@
 
   // Départ et arrivée d’un vol (base communautaire adsbdb : peut être absente ou inexacte)
   async function getRoute(cs) {
-    if (!cs) return null;
+    routeError = "";
+    if (!cs) { routeError = "vol sans indicatif"; return null; }
     try {
       const url = "https://api.adsbdb.com/v0/callsign/" + encodeURIComponent(cs);
       const res = await fetch(PROXY ? PROXY + "?u=" + encodeURIComponent(url) : url);
-      if (!res.ok) return null;
+      if (res.status === 400) { routeError = "relais non mis à jour"; return null; }
+      if (res.status === 404) { routeError = "vol absent de la base"; return null; }
+      if (!res.ok) { routeError = "erreur " + res.status; return null; }
       const fr = (await res.json()).response?.flightroute;
-      return fr && fr.origin && fr.destination ? fr : null;
-    } catch (err) { return null; }
+      if (!(fr && fr.origin && fr.destination)) { routeError = "trajet incomplet"; return null; }
+      return fr;
+    } catch (err) {
+      routeError = "connexion impossible";
+      return null;
+    }
   }
 
-  const fmtAirport = (a) => a ? `${a.municipality || a.name}${a.iata_code ? " (" + a.iata_code + ")" : ""}` : "";
-  const hhmm = (t) => new Date(t).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+  const hm = (min) => {
+    const m = Math.max(0, Math.round(min));
+    return String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0");
+  };
 
-  // Fiche de suivi : uniquement l’essentiel
-  function followRows(ac, altText) {
+  // Fiche de suivi (style Flightradar24)
+  function fillFollowCard(ac, alt) {
     const r = followRoute;
-    let eta = "", rest = "";
-    if (r && typeof ac.gs === "number" && ac.gs > 50 && !landed) {
-      const km = distKm([ac.lat, ac.lon], [r.destination.latitude, r.destination.longitude]);
-      const min = Math.round((km / (ac.gs * 1.852)) * 60);
-      eta = (min >= 60 ? Math.floor(min / 60) + " h " + String(min % 60).padStart(2, "0") + " min" : min + " min") +
-            ` (vers ${hhmm(Date.now() + min * 60000)})`;
-      rest = Math.round(km).toLocaleString("fr-FR") + " km";
+    const cs = (ac.flight || "").trim();
+    const show = (id, text) => { $(id).textContent = text || ""; $(id).style.display = text ? "" : "none"; };
+    $("fc-call").textContent = cs || ac.r || "—";
+    show("fc-iata", r && r.callsign_iata);
+    show("fc-type", ac.t);
+    $("fc-air").textContent = (r && r.airline && r.airline.name) || ac.ownOp || airlineFromCallsign(cs) || "";
+    $("fc-o").textContent = r ? (r.origin.iata_code || r.origin.icao_code || "—") : "—";
+    $("fc-on").textContent = r ? (r.origin.municipality || r.origin.name || "") : "";
+    $("fc-d").textContent = r ? (r.destination.iata_code || r.destination.icao_code || "—") : "—";
+    $("fc-dn").textContent = r ? (r.destination.municipality || r.destination.name || "") : "";
+
+    const gs = typeof ac.gs === "number" ? ac.gs : 0;
+    let pct = 0, since = "N/A", eta = "N/A";
+    if (r) {
+      const here = [ac.lat, ac.lon];
+      const flown = distKm([r.origin.latitude, r.origin.longitude], here);
+      const left = distKm(here, [r.destination.latitude, r.destination.longitude]);
+      pct = flown + left > 0 ? Math.round((100 * flown) / (flown + left)) : 0;
+      if (landed) pct = 100;
+      if (!landed && alt !== "ground" && gs >= 100) {
+        eta = hm((left / (gs * 1.852)) * 60);
+        if (gs >= 200) since = "≈ " + hm((flown / (gs * 1.852)) * 60);   // estimation d’après la distance déjà parcourue
+      }
     }
-    return [
-      ["Départ", r ? fmtAirport(r.origin) : ""],
-      ["Arrivée", r ? fmtAirport(r.destination) : "Inconnue (trajet introuvable)"],
-      ["Statut", landed ? "Atterri ✔" : ac.alt_baro === "ground" ? "Au sol" : "En vol"],
-      ["Suivi depuis", hhmm(followStart)],
-      ["Arrivée estimée", eta],
-      ["Distance restante", rest],
-      ["Vitesse", typeof ac.gs === "number" ? `${Math.round(ac.gs * 1.852)} km/h` : ""],
-      ["Altitude", altText]
-    ];
+    $("fc-fill").style.width = pct + "%";
+    $("fc-since").textContent = "Décoll. il y a " + since;
+    $("fc-eta").textContent = landed ? "Atterri ✔" : r ? "Arrivée dans " + eta : "Trajet indisponible : " + routeError;
+    $("fc-alt").textContent = alt === "ground" ? "Au sol" : typeof alt === "number" ? alt.toLocaleString("fr-FR") + " ft" : "N/A";
+    $("fc-spd").textContent = gs ? Math.round(gs) + " kts" : "N/A";
+    $("fc-model").textContent = ac.desc || ac.t || "";
+    $("fc-reg").textContent = ac.r ? "IMM. " + ac.r : "";
   }
 
   function refilter() { for (const p of planes.values()) applyFilter(p); }
@@ -548,19 +619,30 @@
     const r = followRoute, p = planes.get(followHex);
     if (!r || !p) return;
     const a = [r.origin.latitude, r.origin.longitude], b = [r.destination.latitude, r.destination.longitude];
-    L.polyline(greatCircle(a, b), { color: "#3d6fe0", weight: 2, dashArray: "6 8" }).addTo(routeLayer);
+    routePast = L.polyline([], { color: "#8a5cf6", weight: 3 }).addTo(routeLayer);
+    routeFuture = L.polyline([], { color: "#8a5cf6", weight: 2, dashArray: "6 8", opacity: 0.7 }).addTo(routeLayer);
     for (const [pt, ap] of [[a, r.origin], [b, r.destination]]) {
+      const name = (ap.municipality || ap.name || "").toUpperCase();
       L.circleMarker(pt, { radius: 6, color: "#0e1a24", weight: 2, fillColor: "#fff", fillOpacity: 1 })
-        .bindTooltip(ap.iata_code || ap.icao_code || ap.municipality || "", { permanent: true, direction: "top" })
+        .bindTooltip(`${name} (${ap.iata_code || ap.icao_code || ""})`, { permanent: true, direction: "top" })
         .addTo(routeLayer);
     }
+    updateRouteLines();
     map.fitBounds(L.latLngBounds([a, b, p.marker.getLatLng()]), { padding: [50, 50] });
+  }
+
+  function updateRouteLines() {
+    const r = followRoute, p = planes.get(followHex);
+    if (!routeMode || !r || !p || !routePast) return;
+    const c = p.marker.getLatLng(), cur = [c.lat, c.lng];
+    routePast.setLatLngs(greatCircle([r.origin.latitude, r.origin.longitude], cur, 48));
+    routeFuture.setLatLngs(greatCircle(cur, [r.destination.latitude, r.destination.longitude], 48));
   }
 
   async function startFollow(hex, withRoute) {
     const p = planes.get(hex);
     if (!p) return;
-    followHex = hex; selected = hex; routeMode = withRoute; followCenter = !withRoute; pendingRoute = false;
+    followHex = hex; selected = hex; sheetHidden = false; routeMode = withRoute; followCenter = !withRoute; pendingRoute = false;
     followStart = Date.now(); followRoute = null; wasAirborne = false; landed = false;
     routeLayer.clearLayers();
     refilter(); updateTabs(); showInfo();
@@ -577,6 +659,7 @@
   function stopFollow() {
     followHex = null; routeMode = false; pendingRoute = false; followRoute = null; followCenter = true;
     routeLayer.clearLayers();
+    routePast = routeFuture = null; sheetHidden = false;
     refilter(); updateTabs(); showInfo(); refresh();
   }
 
