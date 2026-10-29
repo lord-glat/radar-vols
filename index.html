@@ -123,6 +123,7 @@
   </div>
   <div id="f-actions">
     <button id="f-follow">Suivre</button>
+    <button id="f-share">Partager</button>
     <button id="f-center" style="display:none">Recentrer</button>
   </div>
 </div>
@@ -166,7 +167,7 @@
 
   // ---------- Carte ----------
   const map = L.map("map", { worldCopyJump: true }).setView([46.6, 2.4], 7);
-  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  const osm = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution: "© OpenStreetMap", maxZoom: 18
   }).addTo(map);
 
@@ -428,6 +429,7 @@
     const list = rows;
     $("f-follow").textContent = following ? "Arrêter le suivi" : "Suivre";
     $("f-center").style.display = following && !followCenter ? "inline-block" : "none";
+    $("f-center").textContent = routeMode && followRoute ? "Tout l’itinéraire" : "Recentrer";
     const dl = $("f-list");
     dl.textContent = "";
     for (const [label, value] of list) {
@@ -511,7 +513,7 @@
     if (sp) {
       const c = sp.marker.getLatLng();
       // En vue Itinéraire, la ligne violette remplace la trace jaune (qui ne montre que le chemin depuis l’ouverture de la page)
-      trailLine.setLatLngs(routeMode && followRoute ? [] : [...sp.trail, [c.lat, c.lng]]);
+      trailLine.setLatLngs(routeMode && followRoute ? [] : followTrace && followHex ? [...followTrace, [c.lat, c.lng]] : [...sp.trail, [c.lat, c.lng]]);
       if (followHex && followCenter) map.panTo(c, { animate: false });
       updateRouteLines();
     }
@@ -521,6 +523,7 @@
   let followHex = null, routeMode = false, followCenter = true, pendingRoute = false;
   let followStart = 0, followRoute = null, wasAirborne = false, landed = false;
   let sheetHidden = false, routeError = "", routePast = null, routeFuture = null;
+  let followTrace = null, followTakeoff = null, followLanding = null, lastTraceAt = 0, avgGs = 0;
   const routeLayer = L.layerGroup().addTo(map);
 
   const distKm = (a, b) => {
@@ -586,21 +589,27 @@
     $("fc-dn").textContent = r ? (r.destination.municipality || r.destination.name || "") : "";
 
     const gs = typeof ac.gs === "number" ? ac.gs : 0;
+    const speed = avgGs > 0 ? avgGs : gs;   // vitesse moyenne récente : estimation plus stable
+    const clock = (t) => new Date(t).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
     let pct = 0, since = "N/A", eta = "N/A";
+    if (followTakeoff && !landed) since = hm((Date.now() - followTakeoff) / 60000);   // heure réelle de décollage
     if (r) {
       const here = [ac.lat, ac.lon];
       const flown = distKm([r.origin.latitude, r.origin.longitude], here);
       const left = distKm(here, [r.destination.latitude, r.destination.longitude]);
       pct = flown + left > 0 ? Math.round((100 * flown) / (flown + left)) : 0;
       if (landed) pct = 100;
-      if (!landed && alt !== "ground" && gs >= 100) {
-        eta = hm((left / (gs * 1.852)) * 60);
-        if (gs >= 200) since = "≈ " + hm((flown / (gs * 1.852)) * 60);   // estimation d’après la distance déjà parcourue
+      if (!landed && alt !== "ground" && speed >= 100) {
+        eta = hm((left / (speed * 1.852)) * 60);
+        if (!followTakeoff && speed >= 200) since = "≈ " + hm((flown / (speed * 1.852)) * 60);   // estimation
       }
     }
     $("fc-fill").style.width = pct + "%";
-    $("fc-since").textContent = "Décoll. il y a " + since;
-    $("fc-eta").textContent = landed ? "Atterri ✔" : r ? "Arrivée dans " + eta : "Trajet indisponible : " + routeError;
+    $("fc-since").textContent = landed && followTakeoff && followLanding
+      ? "Durée du vol " + hm((followLanding - followTakeoff) / 60000)
+      : "Décoll. il y a " + since;
+    $("fc-eta").textContent = landed ? "Atterri" + (followLanding ? " à " + clock(followLanding) : " ✔")
+      : r ? "Arrivée dans " + eta : "Trajet indisponible : " + routeError;
     $("fc-alt").textContent = alt === "ground" ? "Au sol" : typeof alt === "number" ? alt.toLocaleString("fr-FR") + " ft" : "N/A";
     $("fc-spd").textContent = gs ? Math.round(gs) + " kts" : "N/A";
     $("fc-model").textContent = ac.desc || ac.t || "";
@@ -635,7 +644,7 @@
     const r = followRoute, p = planes.get(followHex);
     if (!routeMode || !r || !p || !routePast) return;
     const c = p.marker.getLatLng(), cur = [c.lat, c.lng];
-    routePast.setLatLngs(greatCircle([r.origin.latitude, r.origin.longitude], cur, 48));
+    routePast.setLatLngs(followTrace ? [...followTrace, cur] : greatCircle([r.origin.latitude, r.origin.longitude], cur, 48));
     routeFuture.setLatLngs(greatCircle(cur, [r.destination.latitude, r.destination.longitude], 48));
   }
 
@@ -644,7 +653,9 @@
     if (!p) return;
     followHex = hex; selected = hex; sheetHidden = false; routeMode = withRoute; followCenter = !withRoute; pendingRoute = false;
     followStart = Date.now(); followRoute = null; wasAirborne = false; landed = false;
+    followTrace = null; followTakeoff = null; followLanding = null; lastTraceAt = Date.now(); avgGs = 0;
     routeLayer.clearLayers();
+    loadTrace(hex); saveFollow(hex, withRoute);
     refilter(); updateTabs(); showInfo();
     setStatus("Suivi en direct");
     const route = await getRoute((p.ac.flight || "").trim());
@@ -658,6 +669,7 @@
 
   function stopFollow() {
     followHex = null; routeMode = false; pendingRoute = false; followRoute = null; followCenter = true;
+    followTrace = null; forgetFollow();
     routeLayer.clearLayers();
     routePast = routeFuture = null; sheetHidden = false;
     refilter(); updateTabs(); showInfo(); refresh();
@@ -672,7 +684,9 @@
           const ac = found[0];
           upsert(ac);
           if (typeof ac.alt_baro === "number" && ac.alt_baro > 100) wasAirborne = true;
-          if (wasAirborne && ac.alt_baro === "ground") landed = true;
+          if (wasAirborne && ac.alt_baro === "ground") { landed = true; forgetFollow(); }
+          if (typeof ac.gs === "number" && ac.gs > 100) avgGs = avgGs ? avgGs * 0.8 + ac.gs * 0.2 : ac.gs;
+          if (Date.now() - lastTraceAt > 60000) { lastTraceAt = Date.now(); loadTrace(followHex); }
           showInfo();
           setStatus(landed ? "Atterri" : "Suivi en direct");
           return;
@@ -685,7 +699,9 @@
   $("f-follow").addEventListener("click", () => {
     if (followHex && followHex === selected) stopFollow(); else if (selected) startFollow(selected, false);
   });
-  $("f-center").addEventListener("click", () => { followCenter = true; showInfo(); });
+  $("f-center").addEventListener("click", () => {
+    if (routeMode && followRoute) drawRoute(); else { followCenter = true; showInfo(); }
+  });
   map.on("dragstart", () => { if (followHex) { followCenter = false; showInfo(); } });
 
   $("tab-map").addEventListener("click", () => { if (followHex || pendingRoute) stopFollow(); });
@@ -696,6 +712,57 @@
     updateTabs();
     setStatus("Touchez un avion pour voir son itinéraire");
   });
+
+  // Trajet réel déjà parcouru + heures réelles de décollage et d’atterrissage (historique adsb.lol)
+  async function loadTrace(hex) {
+    try {
+      const url = `https://adsb.lol/data/traces/${hex.slice(-2)}/trace_full_${hex}.json`;
+      const res = await fetch(PROXY ? PROXY + "?u=" + encodeURIComponent(url) : url);
+      if (!res.ok) return;
+      const data = await res.json();
+      const pts = data.trace || [];
+      let end = pts.length;
+      while (end > 0 && pts[end - 1][3] === "ground") end--;      // ignore la fin au sol (avion posé)
+      let start = end;
+      while (start > 0 && pts[start - 1][3] !== "ground") start--; // remonte jusqu’au décollage
+      const leg = pts.slice(start, end).filter((q) => typeof q[1] === "number");
+      if (followHex !== hex || leg.length < 2) return;
+      const step = Math.max(1, Math.floor(leg.length / 600));
+      followTrace = leg.filter((_, i) => i % step === 0 || i === leg.length - 1).map((q) => [q[1], q[2]]);
+      followTakeoff = start > 0 ? (data.timestamp + pts[start][0]) * 1000 : null;
+      followLanding = end < pts.length ? (data.timestamp + pts[end][0]) * 1000 : null;
+    } catch (err) { /* historique indisponible : on garde l’estimation */ }
+  }
+
+  // Le suivi est mémorisé : en rouvrant le site, il reprend jusqu’à l’atterrissage
+  function saveFollow(hex, route) {
+    try { localStorage.setItem("radar-suivi", JSON.stringify({ hex, route })); } catch (err) {}
+  }
+  function forgetFollow() {
+    try { localStorage.removeItem("radar-suivi"); } catch (err) {}
+  }
+
+  async function loadByHex(hex) {
+    for (const base of SEARCH_SOURCES) {
+      try {
+        const found = await fetchAircraft(`${base}/hex/${hex.toLowerCase()}`);
+        if (found.length) return found[0];
+      } catch (err) { /* source suivante */ }
+    }
+    return null;
+  }
+
+  async function resumeFollow() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem("radar-suivi")); } catch (err) {}
+    if (!saved || !saved.hex) return false;
+    const ac = await loadByHex(saved.hex);
+    if (!ac) { forgetFollow(); return false; }
+    upsert(ac);
+    map.setView([ac.lat, ac.lon], 8);
+    startFollow(ac.hex, !!saved.route);
+    return true;
+  }
 
   // ---------- Recherche par vol ou immatriculation ----------
   // Sources qui savent chercher un avion précis (adresses non vérifiées d’ici)
@@ -734,11 +801,79 @@
   $("go").addEventListener("click", search);
   $("q").addEventListener("keydown", (e) => { if (e.key === "Enter") search(); });
 
+  // ---------- Fonds de carte et radar météo ----------
+  const satellite = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+    attribution: "Imagery © Esri", maxZoom: 18
+  });
+  const radarGroup = L.layerGroup();
+  L.control.layers({ "Plan": osm, "Satellite": satellite }, { "Météo (radar)": radarGroup },
+    { position: "topleft", collapsed: true }).addTo(map);
+
+  // Radar RainViewer : dernière image disponible (gratuit, limité au zoom 7, au-delà l’image est agrandie)
+  let radarTimer = null;
+  async function loadRadar() {
+    try {
+      const res = await fetch("https://api.rainviewer.com/public/weather-maps.json");
+      if (!res.ok) throw new Error("code " + res.status);
+      const data = await res.json();
+      const frames = data.radar && data.radar.past;
+      if (!frames || !frames.length) throw new Error("aucune image");
+      const last = frames[frames.length - 1];
+      radarGroup.clearLayers();
+      L.tileLayer(`${data.host}${last.path}/256/{z}/{x}/{y}/2/1_1.png`, {
+        opacity: 0.65, maxNativeZoom: 7, maxZoom: 18, attribution: "Radar © RainViewer"
+      }).addTo(radarGroup);
+    } catch (err) {
+      setStatus("Radar météo indisponible");
+    }
+  }
+  map.on("overlayadd", (e) => {
+    if (e.layer === radarGroup) { loadRadar(); radarTimer = setInterval(loadRadar, 10 * 60 * 1000); }
+  });
+  map.on("overlayremove", (e) => {
+    if (e.layer === radarGroup) { clearInterval(radarTimer); radarGroup.clearLayers(); }
+  });
+
+  // ---------- Partager ----------
+  $("f-share").addEventListener("click", async () => {
+    const p = selected && planes.get(selected);
+    if (!p) return;
+    const name = (p.ac.flight || "").trim() || p.ac.r || p.ac.hex;
+    const url = location.origin + location.pathname + "#vol=" + p.ac.hex;
+    try {
+      if (navigator.share) await navigator.share({ title: "Radar de vols", text: "Suivez le vol " + name + " en direct", url });
+      else { await navigator.clipboard.writeText(url); setStatus("Lien copié"); }
+    } catch (err) { /* partage annulé */ }
+  });
+
+  // Ouverture d’un lien partagé : le site s’ouvre sur l’avion concerné
+  async function openSharedFlight() {
+    const m = location.hash.match(/^#vol=([0-9a-fA-F]{6})$/);
+    if (!m) return false;
+    setStatus("Recherche du vol partagé…");
+    for (const base of SEARCH_SOURCES) {
+      try {
+        const found = await fetchAircraft(`${base}/hex/${m[1].toLowerCase()}`);
+        if (found.length) {
+          const ac = found[0];
+          upsert(ac);
+          map.setView([ac.lat, ac.lon], 8);
+          select(ac.hex);
+          return true;
+        }
+      } catch (err) { /* source suivante */ }
+    }
+    setStatus("Ce vol n’est plus en vol ou n’est pas capté");
+    return false;
+  }
+
   // Attend 1,5 s après la fin du déplacement de la carte avant de recharger
   let moveTimer = null;
   map.on("moveend", () => { clearTimeout(moveTimer); moveTimer = setTimeout(refresh, 1500); });
   setInterval(refresh, REFRESH_MS);
-  refresh();
+  openSharedFlight()
+    .then((ok) => ok || resumeFollow())
+    .then((ok) => { if (!ok) refresh(); });
 </script>
 </body>
 </html>
