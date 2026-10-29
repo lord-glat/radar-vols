@@ -566,7 +566,7 @@
   }
   // Carte normale : 10 mises à jour par seconde. Suivi : 60 images par seconde pour un mouvement fluide comme un GPS
   setInterval(() => { if (!followHex) step(); }, 100);
-  (function loop() { if (followHex) step(); requestAnimationFrame(loop); })();
+  requestAnimationFrame(function loop() { if (followHex) step(); requestAnimationFrame(loop); });
 
   // ---------- Suivi et itinéraire ----------
   let followHex = null, routeMode = false, followCenter = true, pendingRoute = false;
