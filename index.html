@@ -393,6 +393,7 @@
       p.marker.setIcon(planeIcon(ac));
     }
     p.ac = ac;
+    p.seen = Date.now();
     applyFilter(p);
     const el = p.marker.getElement();
     if (el) el.classList.toggle("sel", hex === selected);
@@ -494,20 +495,28 @@
   map.on("click", () => { if (!followHex) select(null); });
 
   // ---------- Chargement des données ----------
+  const cooldown = {};      // source -> heure jusqu’à laquelle on la laisse tranquille
+  let failStreak = 0;       // échecs d’affilée : le rythme de chargement ralentit
+  const coolDown = (idx, ms) => { cooldown[idx] = Date.now() + ms; };
+  const isCooling = (idx) => (cooldown[idx] || 0) > Date.now();
+
   async function refresh() {
     if (busy) return;
     busy = true;
     if (followHex) { await refreshFollowed(); busy = false; return; }
     if (regionTiles().length) { await refreshRegions(); busy = false; return; }
-    const c = map.getCenter().wrap();
-    let nm = Math.ceil(map.getCenter().distanceTo(map.getBounds().getNorthEast()) / 1852);
+    const rc = map.getCenter().wrap();
+    // Centre arrondi : des requêtes identiques d’un déplacement à l’autre, donc moins de charge pour les serveurs
+    const la = (Math.round(rc.lat * 4) / 4).toFixed(2), lo = (Math.round(rc.lng * 4) / 4).toFixed(2);
+    let nm = Math.ceil(L.latLng(+la, +lo).distanceTo(map.getBounds().getNorthEast()) / 1852 / 25) * 25;
     const tooWide = nm > MAX_NM;
     nm = Math.min(nm, MAX_NM);
-    const la = c.lat.toFixed(3), lo = c.lng.toFixed(3);
     const errors = [];
-    let ok = false;
+    let ok = false, tried = 0;
     for (let i = 0; i < PROVIDERS.length && !ok; i++) {
       const idx = (current + i) % PROVIDERS.length;
+      if (isCooling(idx)) continue;   // source mise au repos après un refus
+      tried++;
       const prov = PROVIDERS[idx];
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 8000);
@@ -522,17 +531,25 @@
         setStatus(`${countVisible()} sur ${planes.size} avions (${prov.name})` + (tooWide ? ", zoomez pour voir toute la zone" : ""));
       } catch (err) {
         errors.push(prov.name + " : " + err.message);
+        coolDown(idx, /code (429|403)/.test(err.message) ? 60000 : 20000);
       }
       clearTimeout(timer);
     }
-    if (!ok) setStatus("Aucune source disponible. " + errors.join(" | "));
+    if (ok) {
+      failStreak = 0;
+    } else {
+      failStreak++;
+      const codes = errors.map((e) => (e.match(/code (\d+)/) || [])[1] || "délai").join("/");
+      setStatus(tried ? `Serveurs de données saturés (${codes}), nouvel essai automatique`
+                      : "Pause pour respecter les limites des serveurs, nouvel essai bientôt");
+    }
     busy = false;
   }
 
   // ---------- Mouvement fluide ----------
   // Entre deux mises à jour, on estime la position d’après la vitesse et le cap
   function estimate(b, now) {
-    const ms = Math.min(Math.max(now - b.t0, 0), 30000);
+    const ms = Math.min(Math.max(now - b.t0, 0), 60000);
     if (!b.gs || b.ground || typeof b.track !== "number") return [b.lat, b.lon];
     const d = b.gs * 0.514444 * (ms / 1000);            // distance parcourue en mètres
     const rad = (b.track * Math.PI) / 180;
@@ -967,7 +984,7 @@
     asie: { nom: "Asie", pts: [[35.6, 139.7], [37.5, 126.5], [40.1, 116.6], [31.1, 121.8], [22.3, 113.9], [1.4, 103.9], [13.7, 100.7], [28.6, 77.1], [19.1, 72.9]] },
     oceanie: { nom: "Océanie", pts: [[-33.9, 151.2], [-37.7, 144.8], [-27.4, 153.1], [-31.9, 115.9], [-37.0, 174.8]] }
   };
-  const MAX_TILES = 16;
+  const MAX_TILES = 12;
   let selectedRegions = new Set();
 
   function regionTiles() {
@@ -980,10 +997,11 @@
   async function fetchTile(la, lo) {
     for (let i = 0; i < PROVIDERS.length; i++) {
       const idx = (current + i) % PROVIDERS.length;
+      if (isCooling(idx)) continue;
       const prov = PROVIDERS[idx];
       try {
         const res = await relayFetch(prov.url(la, lo, 250));
-        if (!res.ok) continue;
+        if (!res.ok) { coolDown(idx, res.status === 429 || res.status === 403 ? 60000 : 20000); continue; }
         const data = await res.json();
         current = idx;
         return prov.parse ? prov.parse(data) : (data.ac || data.aircraft || []);
@@ -992,20 +1010,29 @@
     return null;
   }
 
+  // Pour ne pas saturer les serveurs gratuits, on ne charge que 4 zones à la fois, à tour de rôle
+  let tileCursor = 0;
   async function refreshRegions() {
-    const tiles = regionTiles();
-    const results = await Promise.all(tiles.map(([la, lo]) => fetchTile(la.toFixed(3), lo.toFixed(3))));
+    const all = regionTiles();
+    const BATCH = 4;
+    const batch = [];
+    for (let i = 0; i < Math.min(BATCH, all.length); i++) batch.push(all[(tileCursor + i) % all.length]);
+    tileCursor = (tileCursor + BATCH) % all.length;
+    const results = await Promise.all(batch.map(([la, lo]) => fetchTile(la.toFixed(3), lo.toFixed(3))));
     const ok = results.filter(Boolean);
-    if (!ok.length) { setStatus("Aucune source disponible"); return; }
+    if (!ok.length) {
+      failStreak++;
+      setStatus("Serveurs de données saturés, nouvel essai automatique");
+      return;
+    }
+    failStreak = 0;
     const byHex = new Map();
     for (const list of ok) for (const ac of list) if (typeof ac.lat === "number" && typeof ac.lon === "number") byHex.set(ac.hex, ac);
-    const seen = new Set();
-    for (const ac of byHex.values()) if (upsert(ac)) seen.add(ac.hex);
-    if (ok.length === tiles.length) {   // on ne retire des avions que si toutes les zones ont répondu
-      for (const [hex, p] of planes) if (!seen.has(hex)) { p.marker.remove(); planes.delete(hex); }
-    }
+    for (const ac of byHex.values()) upsert(ac);
+    // On retire un avion seulement s’il n’a pas été revu depuis 90 secondes
+    for (const [hex, p] of planes) if (Date.now() - p.seen > 90000) { p.marker.remove(); planes.delete(hex); }
     showInfo();
-    setStatus(`${countVisible()} sur ${planes.size} avions (${ok.length}/${tiles.length} zones)`);
+    setStatus(`${countVisible()} sur ${planes.size} avions (${all.length} zones, mises à jour par lots)`);
   }
 
   const regList = $("reg-list");
@@ -1028,7 +1055,7 @@
   let moveTimer = null;
   map.on("moveend", () => { clearTimeout(moveTimer); moveTimer = setTimeout(() => { if (!regionTiles().length) refresh(); }, 1500); });
   (function loop() {
-    setTimeout(async () => { await refresh(); loop(); }, followHex ? 4000 : regionTiles().length ? 15000 : REFRESH_MS);
+    setTimeout(async () => { await refresh(); loop(); }, (followHex ? 4000 : regionTiles().length ? 10000 : REFRESH_MS) * Math.min(1 + failStreak, 4));
   })();
   openSharedFlight()
     .then((ok) => ok || resumeFollow())
