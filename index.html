@@ -75,6 +75,15 @@
   #chip span { flex: 1; font-weight: 600; }
   #chip button { padding: 8px 12px; font-size: 14px; font-weight: 600; border: 0; border-radius: 8px; background: #f2c14e; color: #0e1a24; cursor: pointer; }
   #fc-diag { margin-top: 6px; font-size: 11px; color: #6f8696; }
+  .plane svg { filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); transition: transform .2s; }
+  .leaflet-marker-icon.sel .plane svg { filter: drop-shadow(0 0 5px #f2c14e) drop-shadow(0 0 2px #f2c14e); transform: scale(1.35); }
+  #info { border-top: 0; border-radius: 16px 16px 0 0; box-shadow: 0 -8px 24px rgba(0,0,0,.4); }
+  #status { border-radius: 999px; padding: 6px 14px; box-shadow: 0 2px 10px rgba(0,0,0,.35); }
+  #q, #go, #fbtn { box-shadow: 0 2px 10px rgba(0,0,0,.3); }
+  #filters { max-height: calc(100vh - 240px); overflow-y: auto; border-radius: 14px; box-shadow: 0 6px 24px rgba(0,0,0,.4); }
+  #bar button { min-height: 44px; }
+  .dot { font-size: 12px; }
+  #reg-list { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; }
 </style>
 </head>
 <body>
@@ -87,10 +96,14 @@
 <div id="filters">
   <fieldset>
     <legend>Altitude</legend>
-    <label><input type="checkbox" id="flt-ground" checked> Au sol</label>
-    <label><input type="checkbox" id="flt-low" checked> Basse (moins de 10 000 ft)</label>
-    <label><input type="checkbox" id="flt-mid" checked> Moyenne (10 000 à 25 000 ft)</label>
-    <label><input type="checkbox" id="flt-high" checked> Haute (plus de 25 000 ft)</label>
+    <label><input type="checkbox" id="flt-ground" checked> <span class="dot" style="color:#7d8b96">●</span> Au sol</label>
+    <label><input type="checkbox" id="flt-low" checked> <span class="dot" style="color:#f2994a">●</span> Basse (moins de 10 000 ft)</label>
+    <label><input type="checkbox" id="flt-mid" checked> <span class="dot" style="color:#1f9bb0">●</span> Moyenne (10 000 à 25 000 ft)</label>
+    <label><input type="checkbox" id="flt-high" checked> <span class="dot" style="color:#3d6fe0">●</span> Haute (plus de 25 000 ft)</label>
+  </fieldset>
+  <fieldset>
+    <legend>Régions (aucune cochée = zone visible sur la carte)</legend>
+    <div id="reg-list"></div>
   </fieldset>
   <label for="air-btn">Compagnie</label>
   <button type="button" id="air-btn" aria-expanded="false" aria-controls="air-box">Toutes les compagnies ▾</button>
@@ -381,6 +394,8 @@
     }
     p.ac = ac;
     applyFilter(p);
+    const el = p.marker.getElement();
+    if (el) el.classList.toggle("sel", hex === selected);
     p.trail.push([ac.lat, ac.lon]);
     if (p.trail.length > 150) p.trail.shift();
     return true;
@@ -399,8 +414,16 @@
   }
 
   // ---------- Fiche de l’avion sélectionné ----------
+  function markSelected() {
+    for (const [h, p] of planes) {
+      const el = p.marker.getElement();
+      if (el) el.classList.toggle("sel", h === selected);
+    }
+  }
+
   function select(hex) {
     selected = hex;
+    markSelected();
     if (hex) sheetHidden = false;
     if (pendingRoute && hex) { startFollow(hex, true); return; }
     showInfo();
@@ -475,6 +498,7 @@
     if (busy) return;
     busy = true;
     if (followHex) { await refreshFollowed(); busy = false; return; }
+    if (regionTiles().length) { await refreshRegions(); busy = false; return; }
     const c = map.getCenter().wrap();
     let nm = Math.ceil(map.getCenter().distanceTo(map.getBounds().getNorthEast()) / 1852);
     const tooWide = nm > MAX_NM;
@@ -518,7 +542,8 @@
   }
 
   let lastTick = performance.now();
-  setInterval(() => {
+  let frameN = 0;
+  function step() {
     const now = performance.now();
     const k = Math.exp(-(now - lastTick) / 1000);       // résorbe l’écart de correction
     lastTick = now;
@@ -533,11 +558,15 @@
     if (sp) {
       const c = sp.marker.getLatLng();
       // En vue Itinéraire, la ligne violette remplace la trace jaune (qui ne montre que le chemin depuis l’ouverture de la page)
-      trailLine.setLatLngs(routeMode && followRoute ? [] : followTrace && followHex ? [...followTrace, [c.lat, c.lng]] : [...sp.trail, [c.lat, c.lng]]);
+      const drawNow = !followHex || ++frameN % 6 === 0;   // en suivi (60 images/s), les lignes sont redessinées moins souvent
+      if (drawNow) trailLine.setLatLngs(routeMode && followRoute ? [] : followTrace && followHex ? [...followTrace, [c.lat, c.lng]] : [...sp.trail, [c.lat, c.lng]]);
       if (followHex && followCenter) map.panTo(c, { animate: false });
-      updateRouteLines();
+      if (drawNow) updateRouteLines();
     }
-  }, 100);
+  }
+  // Carte normale : 10 mises à jour par seconde. Suivi : 60 images par seconde pour un mouvement fluide comme un GPS
+  setInterval(() => { if (!followHex) step(); }, 100);
+  (function loop() { if (followHex) step(); requestAnimationFrame(loop); })();
 
   // ---------- Suivi et itinéraire ----------
   let followHex = null, routeMode = false, followCenter = true, pendingRoute = false;
@@ -925,10 +954,82 @@
     return false;
   }
 
+  // ---------- Régions ----------
+  // L’API gratuite ne donne que 250 milles nautiques autour d’un point : chaque région est donc
+  // couverte par des « zones » placées sur ses grands aéroports (pas par tout le continent).
+  const REGIONS = {
+    france: { nom: "France", pts: [[48.85, 2.35], [45.75, 4.85], [43.6, 1.4], [48.1, -1.7]] },
+    europe: { nom: "Europe", pts: [[51.5, -0.1], [48.8, 2.4], [52.3, 4.8], [50.0, 8.6], [40.4, -3.7], [45.5, 9.2], [41.9, 12.5], [48.2, 16.4], [52.2, 21.0], [37.9, 23.7], [41.0, 29.0], [59.6, 17.9]] },
+    namerique: { nom: "Amérique du Nord", pts: [[40.7, -74.0], [41.9, -87.9], [33.6, -84.4], [32.9, -97.0], [34.0, -118.4], [39.8, -104.7], [25.8, -80.3], [43.7, -79.6], [47.4, -122.3]] },
+    samerique: { nom: "Amérique du Sud", pts: [[-23.4, -46.5], [-34.8, -58.5], [4.7, -74.1], [-12.0, -77.1], [-33.4, -70.8]] },
+    moyenorient: { nom: "Moyen-Orient", pts: [[30.0, 31.4], [25.2, 55.3], [25.3, 51.6], [24.9, 46.7], [33.4, -7.6]] },
+    afrique: { nom: "Afrique", pts: [[-26.1, 28.2], [6.6, 3.3], [-1.3, 36.9], [9.0, 38.8], [-34.0, 18.6]] },
+    asie: { nom: "Asie", pts: [[35.6, 139.7], [37.5, 126.5], [40.1, 116.6], [31.1, 121.8], [22.3, 113.9], [1.4, 103.9], [13.7, 100.7], [28.6, 77.1], [19.1, 72.9]] },
+    oceanie: { nom: "Océanie", pts: [[-33.9, 151.2], [-37.7, 144.8], [-27.4, 153.1], [-31.9, 115.9], [-37.0, 174.8]] }
+  };
+  const MAX_TILES = 16;
+  let selectedRegions = new Set();
+
+  function regionTiles() {
+    const pts = [];
+    for (const k of selectedRegions) pts.push(...REGIONS[k].pts);
+    return pts.slice(0, MAX_TILES);
+  }
+
+  // Charge une zone en essayant les sources dans l’ordre
+  async function fetchTile(la, lo) {
+    for (let i = 0; i < PROVIDERS.length; i++) {
+      const idx = (current + i) % PROVIDERS.length;
+      const prov = PROVIDERS[idx];
+      try {
+        const res = await relayFetch(prov.url(la, lo, 250));
+        if (!res.ok) continue;
+        const data = await res.json();
+        current = idx;
+        return prov.parse ? prov.parse(data) : (data.ac || data.aircraft || []);
+      } catch (err) { /* source suivante */ }
+    }
+    return null;
+  }
+
+  async function refreshRegions() {
+    const tiles = regionTiles();
+    const results = await Promise.all(tiles.map(([la, lo]) => fetchTile(la.toFixed(3), lo.toFixed(3))));
+    const ok = results.filter(Boolean);
+    if (!ok.length) { setStatus("Aucune source disponible"); return; }
+    const byHex = new Map();
+    for (const list of ok) for (const ac of list) if (typeof ac.lat === "number" && typeof ac.lon === "number") byHex.set(ac.hex, ac);
+    const seen = new Set();
+    for (const ac of byHex.values()) if (upsert(ac)) seen.add(ac.hex);
+    if (ok.length === tiles.length) {   // on ne retire des avions que si toutes les zones ont répondu
+      for (const [hex, p] of planes) if (!seen.has(hex)) { p.marker.remove(); planes.delete(hex); }
+    }
+    showInfo();
+    setStatus(`${countVisible()} sur ${planes.size} avions (${ok.length}/${tiles.length} zones)`);
+  }
+
+  const regList = $("reg-list");
+  for (const [key, r] of Object.entries(REGIONS)) {
+    const label = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = key;
+    label.append(box, " " + r.nom);
+    regList.appendChild(label);
+  }
+  regList.addEventListener("change", () => {
+    selectedRegions = new Set([...regList.querySelectorAll("input:checked")].map((b) => b.value));
+    const tiles = regionTiles();
+    if (tiles.length) map.fitBounds(L.latLngBounds(tiles).pad(0.3));
+    refresh();
+  });
+
   // Attend 1,5 s après la fin du déplacement de la carte avant de recharger
   let moveTimer = null;
-  map.on("moveend", () => { clearTimeout(moveTimer); moveTimer = setTimeout(refresh, 1500); });
-  setInterval(refresh, REFRESH_MS);
+  map.on("moveend", () => { clearTimeout(moveTimer); moveTimer = setTimeout(() => { if (!regionTiles().length) refresh(); }, 1500); });
+  (function loop() {
+    setTimeout(async () => { await refresh(); loop(); }, followHex ? 4000 : regionTiles().length ? 15000 : REFRESH_MS);
+  })();
   openSharedFlight()
     .then((ok) => ok || resumeFollow())
     .then((ok) => { if (!ok) refresh(); });
